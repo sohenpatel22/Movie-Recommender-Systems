@@ -28,11 +28,14 @@ SEEDS = [0]
 # Training defaults
 DEFAULT_BATCH_SIZE = 512
 DEFAULT_NUM_FACTORS = 40
-DEFAULT_EMBED_DIM = 32
-DEFAULT_LR = 1e-3
+DEFAULT_EMBED_DIM = 128     # restored — 32 is too small for two-tower towers
+DEFAULT_LR = 1e-3                # restored for MF and retrieval
+DEFAULT_LR_FINETUNE = 5e-5       # NEW — separate slower LR only for fine-tuning
 DEFAULT_EPOCHS_MF = 30
-DEFAULT_EPOCHS_RETRIEVAL = 5
+DEFAULT_EPOCHS_RETRIEVAL = 15
 DEFAULT_EPOCHS_RANKER = 5
+DEFAULT_WEIGHT_DECAY = 1e-5
+DEFAULT_EPOCHS_FINETUNE = 75
 
 # Recommendation settings
 DEFAULT_K = 10
