@@ -6,11 +6,11 @@ This project implements a **modular recommendation system pipeline** using the M
 
 The goal is to move beyond simple models and build a **structured end-to-end system** that includes:
 
-- Data preprocessing and feature engineering  
-- Temporal train/validation/test splitting  
-- Multiple recommendation models  
-- Retrieval + ranking pipeline  
-- Evaluation using ranking metrics  
+* Data preprocessing and feature engineering
+* Temporal train/validation/test splitting
+* Multiple recommendation models
+* Retrieval + ranking pipeline
+* Evaluation using ranking metrics
 
 The project compares three approaches:
 
@@ -25,24 +25,27 @@ The project compares three approaches:
 Most beginner projects focus only on training a model.
 
 In real-world systems:
-- recommendations are **multi-stage**
-- models are evaluated on **ranking metrics**, not just loss
-- **data leakage must be avoided**
+
+* recommendations are **multi-stage**
+* models are evaluated on **ranking metrics**, not just loss
+* **data leakage must be avoided**
 
 This project was built to understand:
-- how recommendation systems are structured
-- how retrieval and ranking work together
-- how to evaluate recommendations properly
+
+* how recommendation systems are structured
+* how retrieval and ranking work together
+* how to evaluate recommendations properly
 
 ---
 
 ## Dataset
 
-- **MovieLens 100K**
-- ~100,000 user-movie interactions
-- Includes:
-  - user metadata (age, gender, occupation)
-  - movie metadata (genres, release date)
+* **MovieLens 100K**
+* ~100,000 user-movie interactions
+* Includes:
+
+  * user metadata (age, gender, occupation)
+  * movie metadata (genres, release date)
 
 ---
 
@@ -50,10 +53,10 @@ This project was built to understand:
 
 Key steps:
 
-- Remove duplicate user-movie interactions
-- Convert timestamps → monthly buckets
-- Encode categorical features (gender, occupation)
-- Normalize numerical features (age, release date)
+* Remove duplicate user-movie interactions
+* Convert timestamps → monthly buckets
+* Encode categorical features (gender, occupation)
+* Normalize numerical features (age, release date)
 
 ---
 
@@ -61,11 +64,11 @@ Key steps:
 
 A **temporal split** is used:
 
-- Train: data up to Feb 1998  
-- Validation: March 1998  
-- Test: April 1998  
+* Train: data up to Feb 1998
+* Validation: March 1998
+* Test: April 1998
 
-This prevents **data leakage** and simulates real-world recommendation scenarios.
+This prevents **data leakage** and ensures the model predicts future interactions using past data, which better reflects real-world recommendation systems.
 
 ---
 
@@ -73,28 +76,31 @@ This prevents **data leakage** and simulates real-world recommendation scenarios
 
 ### 1. Matrix Factorization (MF)
 
-- Learns user and item embeddings
-- Predicts ratings using dot product
-- Includes bias terms and global mean
+* Learns user and item embeddings
+* Predicts ratings using dot product
+* Includes bias terms and global mean
 
 ---
 
 ### 2. MF + Content-Based Features
 
-- Extends MF with:
-  - user features (age, occupation, etc.)
-  - item features (genres, release date)
-- Features are projected into embedding space
+* Extends MF with:
+
+  * user features (age, occupation, etc.)
+  * item features (genres, release date)
+* Features are projected into embedding space
 
 ---
 
 ### 3. Two-Tower Retrieval Model
 
-- Separate networks for:
-  - users
-  - items
-- Learns embeddings for large-scale retrieval
-- Uses in-batch negatives for training
+* Separate networks for:
+
+  * users
+  * items
+* Learns embeddings for large-scale retrieval
+* Uses in-batch negatives for training
+* Uses dot-product similarity between user and item embeddings
 
 ---
 
@@ -103,11 +109,15 @@ This prevents **data leakage** and simulates real-world recommendation scenarios
 The final system follows a real-world structure:
 
 ### Stage 1: Retrieval
-- Two-Tower model retrieves top-N candidate items
+
+* Two-Tower model retrieves top-N candidate items
 
 ### Stage 2: Ranking
-- MF model rescoring candidates
-- Final top-K recommendations are selected
+
+* MF model rescoring candidates
+* Final top-K recommendations are selected
+
+**Note:** The ranking stage is limited by the quality of candidates generated during retrieval.
 
 ---
 
@@ -115,10 +125,10 @@ The final system follows a real-world structure:
 
 Models are evaluated using:
 
-- Precision@K  
-- Recall@K  
-- Hit Rate@K  
-- NDCG@K  
+* Precision@K
+* Recall@K
+* Hit Rate@K
+* NDCG@K
 
 These metrics measure **ranking quality**, not just prediction accuracy.
 
@@ -126,46 +136,49 @@ These metrics measure **ranking quality**, not just prediction accuracy.
 
 ## Results
 
-| Model        | Precision@10 | Recall@10 | Hit Rate@10 | NDCG@10 |
-|--------------|-------------|----------|------------|---------|
-| MF           | ~0.29       | ~0.05    | ~0.84      | ~0.30   |
-| MF + CBF     | ~0.20       | ~0.03    | ~0.75      | ~0.22   |
-| Two-Tower    | **~0.34**   | **~0.09**| ~0.84      | **~0.36**|
+Results are reported on the test set using ranking metrics.
+
+| Model     | Precision@10 | Recall@10 | Hit Rate@10 | NDCG@10 |
+| --------- | -----------: | --------: | ----------: | ------: |
+| MF        |       0.1389 |    0.0388 |      0.5309 |  0.1614 |
+| MF + CBF  |       0.1160 |    0.0580 |      0.4753 |  0.1364 |
+| Two-Tower |       0.1041 |    0.0535 |      0.4189 |  0.1296 |
 
 **Observation:**
-- Two-Tower pipeline improves recall and ranking quality
-- MF remains a strong baseline
-- Adding content features did not outperform pure MF in this setup
+
+* Matrix Factorization (MF) provided the strongest overall ranking performance in this setup
+* MF + CBF improved recall compared with MF, but reduced precision and overall ranking quality
+* The Two-Tower retrieval + reranking pipeline did not outperform the MF baseline in these experiments
+
+This highlights an important practical insight: **more complex architectures do not always outperform simpler baselines without careful tuning**, especially on smaller datasets like MovieLens 100K.
 
 ---
 
 ## Project Structure
 
 ```
-
 src/
-data/
-models/
-training/
-evaluation/
-utils/
+  data/
+  models/
+  training/
+  evaluation/
+  utils/
 
 scripts/
-run_mf.py
-run_mf_cbf.py
-run_two_tower.py
-compare_models.py
+  run_mf.py
+  run_mf_cbf.py
+  run_two_tower.py
+  compare_models.py
 
 data/
-raw/
-processed/
+  raw/
+  processed/
 
 outputs/
-metrics/
-models/
-figures/
-
-````
+  metrics/
+  models/
+  figures/
+```
 
 ---
 
@@ -175,7 +188,7 @@ figures/
 
 ```bash
 pip install -r requirements.txt
-````
+```
 
 ### 2. Run experiments
 
@@ -197,16 +210,18 @@ python scripts/compare_models.py
 
 * Recommendation systems are **pipeline-based**, not single models
 * Temporal splitting is critical to avoid leakage
-* Retrieval + ranking is more effective than standalone models
+* Retrieval + ranking is a standard real-world system design
+* Strong baselines like MF can outperform more complex models if not carefully tuned
 * Evaluation should focus on **ranking metrics**, not just MSE
 
 ---
 
 ## Future Improvements
 
-* Add negative sampling strategies beyond in-batch negatives
-* Improve feature engineering for MF + CBF
-* Add approximate nearest neighbor (ANN) retrieval
+* Improve retrieval training with better negative sampling
+* Use larger candidate pools or approximate nearest neighbor (ANN) search
+* Tune Two-Tower architecture and loss functions
+* Explore hybrid blending of MF and retrieval scores
 * Deploy a simple recommendation demo
 
 ---
@@ -215,5 +230,6 @@ python scripts/compare_models.py
 
 * Models must be trained before evaluation scripts are run
 * Data is downloaded automatically (not included in repo)
+* Large artifacts such as model weights are excluded from version control
 
 ---
