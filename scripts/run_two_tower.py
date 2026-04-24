@@ -16,6 +16,7 @@ from src.data.preprocessing import (
 from src.data.split import temporal_split
 from src.models.matrix_factorization import MatrixFactorisation
 from src.models.two_tower import TwoTowerModel
+from src.training.candidate_aware_ranker import fine_tune_ranker_on_candidates
 from src.training.rank_candidates import run_ranking_stage
 from src.training.train_mf import run_mf_training
 from src.training.train_retrieval import run_retrieval_training
@@ -33,6 +34,8 @@ from src.utils.config import (
     METRICS_DIR,
     MODELS_DIR,
     SEEDS,
+    DEFAULT_WEIGHT_DECAY,
+    DEFAULT_EPOCHS_FINETUNE,
     create_directories,
 )
 from src.utils.seed import set_seed
@@ -106,7 +109,14 @@ def main():
     val_user_ids = get_unique_users_from_dataset(val_set)
     test_user_ids = get_unique_users_from_dataset(test_set)
 
-    test_user_internal_ids = convert_user_ids_to_internal(train_set, test_user_ids)
+    # Internal index lists — used for candidate generation and fine-tune splitting
+    train_user_internal_ids = convert_user_ids_to_internal(train_set, train_user_ids)
+    val_user_internal_ids   = convert_user_ids_to_internal(train_set, val_user_ids)
+    test_user_internal_ids  = convert_user_ids_to_internal(train_set, test_user_ids)
+
+    # Sets for fast membership checks when splitting candidates
+    train_user_internal_idx_set = set(train_user_internal_ids)
+    val_user_internal_idx_set   = set(val_user_internal_ids)
 
     train_seen_map, train_val_seen_map = build_seen_maps(train_df, val_df)
 
@@ -119,6 +129,7 @@ def main():
 
         global_mean = float(train_df["rating"].mean())
 
+        #Pretrain MF ranker on all pairs
         print("Training MF ranker")
         ranker_model = MatrixFactorisation(
             dataset=train_set,
@@ -146,6 +157,7 @@ def main():
 
         ranker_model = mf_train_results["model"]
 
+        #Train retrieval with hard negatives + temperature
         print("Training retrieval model")
         retrieval_model = TwoTowerModel(
             num_users=train_set.num_users,
@@ -161,14 +173,60 @@ def main():
             val_loader=val_loader,
             dataset=train_set,
             device=DEVICE,
-            epochs=DEFAULT_EPOCHS_RETRIEVAL,
+            epochs=DEFAULT_EPOCHS_RETRIEVAL, #Updated
             learning_rate=DEFAULT_LR,
+            weight_decay=DEFAULT_WEIGHT_DECAY, #Updated
             retrieval_topk=DEFAULT_RETRIEVAL_TOPK,
-            candidate_topk=DEFAULT_RETRIEVAL_TOPK,
+            candidate_topk=200,                     #Updated
             candidate_user_idx_list=test_user_internal_ids,
             seen_items_map=train_val_seen_map,
+            mf_model=ranker_model,       # Updated - used for hard negative mining
+            hard_neg_k=30,               # Updated — top-30 MF scores as hard neg pool
+            hard_neg_weight=1.5,         # Updated — penalise hard negs a bit more
+            patience=3,                  # Updated — early stopping
         )
 
+        retrieval_model = retrieval_results["model"]
+        candidates      = retrieval_results["candidates"]
+
+        #Fine-tune ranker on retrieved candidates
+        print("Generating train/val candidates for ranker fine-tuning")
+        from src.training.train_retrieval import get_top_k_candidates
+
+        train_val_candidates = get_top_k_candidates(
+            retrieval_model=retrieval_model,
+            dataset=train_set,
+            device=DEVICE,
+            top_k=200,
+            user_idx_list=train_user_internal_ids + val_user_internal_ids,
+            seen_items_map=train_seen_map,
+        )
+
+        train_candidates = {
+            k: v for k, v in train_val_candidates.items()
+            if k in train_user_internal_idx_set
+        }
+        val_candidates = {
+            k: v for k, v in train_val_candidates.items()
+            if k in val_user_internal_idx_set
+        }
+
+        print("Fine-tuning ranker on retrieved candidates")
+        ranker_model = fine_tune_ranker_on_candidates(
+            ranker_model=ranker_model,
+            dataset=train_set,
+            candidates=train_candidates,
+            relevant_ratings=train_set.relevant_ratings,
+            device=DEVICE,
+            epochs=DEFAULT_EPOCHS_FINETUNE,
+            learning_rate=1e-4,
+            neg_pos_ratio=4,
+            val_candidates=val_candidates,
+            val_relevant_ratings=val_set.relevant_ratings,
+            k=DEFAULT_K,
+        )
+
+        #Rerank test candidates with fine-tuned ranker
         print("Running reranking stage")
         ranking_results = run_ranking_stage(
             ranker_model=ranker_model,
@@ -189,7 +247,7 @@ def main():
         )
 
         torch.save(
-            retrieval_results["model"].state_dict(),
+            retrieval_model.state_dict(),
             MODELS_DIR / f"two_tower_seed_{seed}.pt",
         )
         torch.save(
