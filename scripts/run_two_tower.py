@@ -19,7 +19,7 @@ from src.models.two_tower import TwoTowerModel
 from src.training.candidate_aware_ranker import fine_tune_ranker_on_candidates
 from src.training.rank_candidates import run_ranking_stage
 from src.training.train_mf import run_mf_training
-from src.training.train_retrieval import run_retrieval_training
+from src.training.train_retrieval import get_top_k_candidates, run_retrieval_training
 from src.utils.config import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_EPOCHS_MF,
@@ -27,6 +27,7 @@ from src.utils.config import (
     DEFAULT_EPOCHS_RETRIEVAL,
     DEFAULT_K,
     DEFAULT_LR,
+    DEFAULT_LR_FINETUNE,
     DEFAULT_NUM_FACTORS,
     DEFAULT_RETRIEVAL_TOPK,
     DEFAULT_EMBED_DIM,
@@ -191,7 +192,6 @@ def main():
 
         #Fine-tune ranker on retrieved candidates
         print("Generating train/val candidates for ranker fine-tuning")
-        from src.training.train_retrieval import get_top_k_candidates
 
         train_val_candidates = get_top_k_candidates(
             retrieval_model=retrieval_model,
@@ -199,7 +199,7 @@ def main():
             device=DEVICE,
             top_k=200,
             user_idx_list=train_user_internal_ids + val_user_internal_ids,
-            seen_items_map=train_seen_map,
+            seen_items_map=None,
         )
 
         train_candidates = {
@@ -219,7 +219,7 @@ def main():
             relevant_ratings=train_set.relevant_ratings,
             device=DEVICE,
             epochs=DEFAULT_EPOCHS_FINETUNE,
-            learning_rate=1e-4,
+            learning_rate=DEFAULT_LR_FINETUNE ,
             neg_pos_ratio=4,
             val_candidates=val_candidates,
             val_relevant_ratings=val_set.relevant_ratings,
@@ -231,7 +231,7 @@ def main():
         ranking_results = run_ranking_stage(
             ranker_model=ranker_model,
             dataset=train_set,
-            user_candidates=retrieval_results["candidates"],
+            user_candidates=candidates,
             relevant_ratings=test_set.relevant_ratings,
             device=DEVICE,
             k=DEFAULT_K,
