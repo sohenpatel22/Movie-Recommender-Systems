@@ -312,5 +312,3 @@ Possible future improvements include:
 * Raw data and model checkpoints are not committed to GitHub
 * Results may vary slightly depending on hardware and random seed
 * The current reported results use one seed for faster experimentation
-
-````
