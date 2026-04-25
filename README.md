@@ -1,4 +1,4 @@
-# Movie Recommendation System
+# Two Stage Recommendation System Retrieval Ranking Pipeline
 
 A modular movie recommendation pipeline built on the MovieLens 100K dataset. The project started as a comparison between standard collaborative filtering approaches and grew into a full two-stage retrieval + ranking system, which ended up being the most interesting part of the work.
 
