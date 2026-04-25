@@ -1,51 +1,27 @@
-# Recommendation System Pipeline (MF vs MF+CBF vs Two-Tower)
+# Movie Recommendation System — ECE1513 Project
 
-## Overview
-
-This project implements a **modular recommendation system pipeline** using the MovieLens 100K dataset.
-
-The goal is to move beyond simple recommendation models and build a structured end-to-end system that includes:
-
-- Data preprocessing and feature engineering
-- Temporal train/validation/test splitting
-- Multiple recommendation models
-- Two-stage retrieval + ranking pipeline
-- Evaluation using ranking metrics
-
-The project compares three approaches:
-
-1. Matrix Factorization (MF)
-2. Matrix Factorization with Content Features (MF + CBF)
-3. Two-Tower Retrieval + MF Reranking
+A modular movie recommendation pipeline built on the MovieLens 100K dataset. The project started as a comparison between standard collaborative filtering approaches and grew into a full two-stage retrieval + ranking system, which ended up being the most interesting part of the work.
 
 ---
 
-## Motivation
+## What This Is
 
-Most beginner recommendation projects focus only on training a single model.
+The core idea was to go beyond the typical "train a matrix factorization model and call it done" approach, and instead build something closer to how recommendation systems actually work in production, which is a retrieval stage that quickly narrows the full catalog down to a manageable candidate set, followed by a more expensive ranking stage that scores those candidates carefully.
 
-In real-world recommendation systems:
+The three models implemented are:
 
-- recommendations are often **multi-stage**
-- retrieval and ranking are handled separately
-- models are evaluated using **ranking metrics**, not just loss
-- temporal data leakage must be avoided
-
-This project was built to understand how recommendation systems are structured, how retrieval and ranking work together, and how different modeling choices affect top-K recommendation quality.
+- **Matrix Factorization (MF)** — standard collaborative filtering baseline
+- **MF + Content-Based Features (MF+CBF)** — adds user and item side features to MF
+- **Two-Tower + MF Reranker** — two-stage pipeline with a retrieval model and a fine-tuned ranker
 
 ---
 
 ## Dataset
 
-This project uses the **MovieLens 100K** dataset.
+MovieLens 100K (~100,000 ratings from 943 users on 1,682 movies). Downloaded automatically when you run any script.
 
-The dataset contains approximately 100,000 user-movie interactions and includes:
-
-- user metadata such as age, gender, and occupation
-- movie metadata such as genres and release date
-- explicit ratings from users
-
-The dataset is downloaded automatically when the pipeline is run.
+User features used: age, gender, occupation.
+Movie features used: genres, release year.
 
 ---
 
@@ -62,253 +38,209 @@ The main preprocessing steps are:
 
 ---
 
-## Train / Validation / Test Split
+## How the Data Is Split
 
-A **temporal split** is used:
+A temporal split is used rather than a random split as this matters a lot for recommendation because random splits leak future interactions into training.
 
-- Train: data up to February 1998
-- Validation: March 1998
-- Test: April 1998
+- **Train**: interactions up to February 1998
+- **Validation**: March 1998
+- **Test**: April 1998
 
-This prevents data leakage and makes the setup closer to a real recommendation scenario, where the model is trained on past interactions and evaluated on future interactions.
+Models are trained on past interactions and evaluated on future ones, which is a much more honest setup.
 
 ---
 
 ## Models
 
-### 1. Matrix Factorization (MF)
+### Matrix Factorization
 
-Matrix Factorization is used as the main collaborative filtering baseline.
+Standard MF with user embeddings, item embeddings, user/item bias terms, and a global mean. Trained with MSE loss and L2 regularization. Serves as the main collaborative filtering baseline.
 
-It learns:
+### MF + Content-Based Features
 
-- user embeddings
-- item embeddings
-- user bias terms
-- item bias terms
-- global rating mean
+Extends the base MF model by projecting user and item side features into the same latent space as the embeddings. The features are added directly to the embedding vectors before the dot product.
 
-The model predicts user-item preference using the dot product between user and item embeddings.
+In practice this didn't improve over plain MF on ranking metrics. MF+CBF got better recall but worse NDCG, which suggests the features added noise to the ranking rather than helping.
 
----
+### Two-Tower Retrieval + MF Reranker
 
-### 2. Matrix Factorization + Content-Based Features
+This is the main model. It has two components:
 
-This model extends the basic MF model by adding user and item side features.
+**Retrieval (Two-Tower model)**
 
-The additional features include:
+A dual-encoder with separate user and movie towers. Each tower has an embedding layer feeding into an MLP, with a residual connection adding the base embedding back to the MLP output. Outputs are L2-normalized so similarity is computed as cosine dot product.
 
-- user age, gender, and occupation
-- movie genres
-- movie release date
+Trained with InfoNCE (contrastive) loss with several improvements:
+- Learnable temperature parameter (log-parameterized, clamped to [0.01, 1.0])
+- Hard negatives mined from the pretrained MF model, for each positive (user, movie) pair, we query MF scores to find movies the MF model thinks are good for that user but aren't the ground truth, and add one of those to the loss denominator
+- In-batch negatives combined with hard negatives in the same loss
+- Gradient clipping (max norm 1.0) since temperature gradients can spike
+- Early stopping on validation Recall@100
 
-These features are projected into the same latent space as the user and item embeddings.
+**Ranking (fine-tuned MF)**
 
----
+After retrieval generates a candidate set of 200 movies per user, an MF model reranks them. The key insight here is that the ranker needs to be trained on the *same distribution it will see at inference* — i.e., the retrieved candidates — rather than on all (user, item) pairs uniformly.
 
-### 3. Two-Tower Retrieval + MF Reranking
+So after retrieval training, we generate candidates for train and val users (without excluding seen items, since those are the positives we need), build a `CandidateRankingDataset` of (user, movie, relevant/not) triples, and fine-tune the ranker with LambdaRank loss. LambdaRank directly optimizes ranking order rather than treating it as binary classification.
 
-The Two-Tower model is used as the retrieval stage.
-
-It contains:
-
-- a user tower
-- a movie tower
-- embedding layers
-- MLP layers
-- dot-product similarity between user and movie embeddings
-
-The retrieval model is trained using:
-
-- in-batch negatives
-- hard negatives mined from the MF model
-- temperature-scaled contrastive loss
-- early stopping based on validation recall
-
-After retrieval, an MF-based ranker is used to rerank the retrieved candidates.
-
-The ranker is further fine-tuned on retrieved candidates so that its training distribution is closer to the final reranking task.
+Fine-tuning uses a much lower learning rate (5e-5 vs 1e-3 for initial MF training) and early stopping on val NDCG@10.
 
 ---
 
-## Two-Stage Recommendation Pipeline
+## Pipeline
 
-The final recommendation system follows a two-stage structure.
+```
+Pretrain MF ranker (5 epochs, LR=1e-3)
+        |
+Train Two-Tower retrieval model
+  - hard negatives from pretrained MF
+  - temperature scaling
+  - early stopping on val Recall@100
+        |
+Generate 200 candidates per user (train+val users, no seen-item exclusion)
+        |
+Fine-tune MF ranker on candidate pairs
+  - LambdaRank loss
+  - early stopping on val NDCG@10
+  - LR=5e-5
+        |
+Generate 200 test candidates (with seen-item exclusion)
+        |
+Rerank test candidates with fine-tuned ranker → top-10
+```
 
-### Stage 1: Retrieval
-
-The Two-Tower model retrieves a candidate set of movies for each user.
-
-This stage focuses on narrowing the full item catalog into a smaller set of likely relevant candidates.
-
-### Stage 2: Ranking
-
-The MF ranker scores the retrieved candidate movies and sorts them.
-
-The final top-K recommendations are selected after reranking.
-
-This setup is useful because retrieval and ranking solve different parts of the recommendation problem.
-
----
-
-## Evaluation Metrics
-
-Models are evaluated using top-K ranking metrics:
-
-- Precision@10
-- Recall@10
-- Hit Rate@10
-- NDCG@10
-
-These metrics are more suitable than MSE alone because recommendation quality depends on how well relevant items are ranked near the top.
+One non-obvious detail: when generating candidates for fine-tuning, we cannot exclude seen items. For train users, their relevant items (positives) ARE their seen items. Masking those out before retrieval means zero positives end up in the candidate pool and the dataset is empty. The seen-item exclusion only makes sense at test time, where you genuinely don't want to recommend things the user has already rated.
 
 ---
 
 ## Results
 
-Results are reported on the test set.
+Evaluated on the April 1998 test set, Precision/Recall/HitRate/NDCG all at K=10.
 
-| Model      | Precision@10 | Recall@10 | Hit Rate@10 | NDCG@10 |
-|------------|-------------:|----------:|------------:|--------:|
-| MF         | 0.1389       | 0.0388    | 0.5309      | 0.1614  |
-| MF + CBF   | 0.1160       | 0.0580    | 0.4753      | 0.1364  |
-| Two-Tower  | **0.2068**   | **0.0833**| **0.6284**  | **0.2352** |
+| Model | Precision@10 | Recall@10 | Hit Rate@10 | NDCG@10 |
+|---|---|---|---|---|
+| MF | 0.1389 | 0.0388 | 0.5309 | 0.1614 |
+| MF + CBF | 0.1160 | 0.0580 | 0.4753 | 0.1364 |
+| Two-Tower + Reranker | **0.2068** | **0.0833** | **0.6284** | **0.2352** |
+
+The Two-Tower pipeline is the best model across every metric. Compared to the MF baseline, NDCG improved by ~46% and Hit Rate by ~18 percentage points.
+
+A few things worth noting about these numbers:
+
+- MF+CBF actually performed *worse* than plain MF on NDCG despite better recal, means adding features doesn't automatically help
+- The original Two-Tower implementation (before the improvements) got NDCG 0.1023, worse than both MF baselines. Getting it above MF required fixing the retrieval stage, not just adding more model capacity
+- Val Recall@100 for the retrieval model plateaus around 0.22, meaning ~78% of relevant items never enter the candidate pool. This is the main remaining bottleneck
 
 ---
 
-## Observations
+## What Actually Made the Difference
 
-The Two-Tower + reranking pipeline achieved the best performance across all ranking metrics.
+In roughly descending order of impact:
 
-Key observations:
-
-- The Two-Tower model improved Precision@10 from 0.1389 to 0.2068 compared with the MF baseline
-- Recall@10 improved from 0.0388 to 0.0833
-- Hit Rate@10 improved from 0.5309 to 0.6284
-- NDCG@10 improved from 0.1614 to 0.2352
-- MF remained a strong baseline despite its simpler structure
-- MF + CBF improved recall compared with MF, but did not improve overall ranking quality
-
-The main takeaway is that a two-stage retrieval + reranking setup can outperform a single-stage baseline when the retrieval and ranking stages are aligned properly.
+1. **Candidate-aware ranker fine-tuning** — training the ranker on retrieved candidates with LambdaRank instead of on all pairs with MSE. This alone was the biggest jump.
+2. **Hard negatives + temperature** — without these, the retrieval model's val Recall@100 stayed flat after epoch 1. Hard negatives from MF gave the model something meaningful to learn from.
+3. **`seen_items_map=None` for fine-tune candidates** — a subtle but critical bug fix. Excluding seen items during candidate generation for train users produced zero positives and crashed the training.
+4. **LayerNorm in tower MLPs** — more stable training than just ReLU stacks.
+5. **Early stopping on val NDCG** for fine-tuning — the ranker was still improving at epoch 20 and converged around epoch 22-50 depending on LR, so running to a fixed epoch count would either underfit or waste time.
+6. **Separate LRs for pre-training vs fine-tuning** — sharing a single `DEFAULT_LR` across MF training and fine-tuning caused the collapse once that LR was lowered to 5e-5. MF needs ~1e-3 to converge in 5 epochs; the fine-tuner benefits from 5e-5 for careful calibration.
 
 ---
 
 ## Project Structure
 
-```text
+```
 .
 ├── data/
-│   ├── raw/
-│   ├── processed/
-│   └── README.md
-│
-├── notebooks/
-│   ├── 01_eda.ipynb
-│   └── 02_results_summary.ipynb
+│   ├── raw/                        # downloaded automatically
+│   └── processed/
 │
 ├── outputs/
 │   ├── figures/
-│   ├── metrics/
-│   └── models/
+│   ├── metrics/                    # JSON summaries + pkl results per model
+│   └── models/                     # saved model checkpoints
 │
 ├── scripts/
 │   ├── run_mf.py
 │   ├── run_mf_cbf.py
-│   ├── run_two_tower.py
+│   ├── run_two_tower.py            # main pipeline
 │   └── compare_models.py
 │
 ├── src/
 │   ├── data/
-│   ├── evaluation/
+│   │   ├── dataset.py
+│   │   ├── download.py
+│   │   ├── preprocessing.py
+│   │   └── split.py
 │   ├── models/
+│   │   ├── matrix_factorization.py
+│   │   └── two_tower.py
 │   ├── training/
+│   │   ├── train_mf.py
+│   │   ├── train_retrieval.py
+│   │   ├── candidate_aware_ranker.py
+│   │   └── rank_candidates.py
+│   ├── evaluation/
+│   │   └── metrics.py
 │   └── utils/
+│       ├── config.py
+│       └── seed.py
 │
 ├── requirements.txt
 └── README.md
-````
+```
 
 ---
 
 ## How to Run
 
-### 1. Install dependencies
-
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Train Matrix Factorization
-
 ```bash
+# Run each model independently
 python -m scripts.run_mf
-```
-
-### 3. Train MF + CBF
-
-```bash
 python -m scripts.run_mf_cbf
-```
-
-### 4. Train Two-Tower retrieval + reranking pipeline
-
-```bash
 python -m scripts.run_two_tower
-```
 
-### 5. Compare all models
-
-```bash
+# Compare results across models
 python -m scripts.compare_models
 ```
 
----
-
-## Outputs
-
-The project saves generated outputs under the `outputs/` directory.
-
-Typical outputs include:
-
-* model comparison CSV files
-* summary JSON files
-* comparison plots
-* model checkpoints
-
-Large artifacts such as model weights are excluded from version control.
+The dataset downloads automatically on first run. Results are saved to `outputs/metrics/` as JSON summaries and pickle files. Model checkpoints go to `outputs/models/`.
 
 ---
 
-## Key Learnings
+## Configuration
 
-This project helped me understand that:
+All training hyperparameters live in `src/utils/config.py`. The ones most worth knowing about:
 
-* recommendation systems are usually pipeline-based, not just single models
-* temporal splitting is important to avoid leakage
-* ranking metrics are more meaningful than only reporting prediction loss
-* simple MF baselines can be strong and should not be ignored
-* retrieval quality strongly affects final recommendation quality
-* hard negative mining can improve retrieval training
-* candidate-aware ranker fine-tuning can improve final reranking performance
+| Parameter | Value | Notes |
+|---|---|---|
+| `DEFAULT_EMBED_DIM` | 128 | Tower embedding dimension — 64 or 32 noticeably hurt retrieval |
+| `DEFAULT_LR` | 1e-3 | Used for MF pretraining and retrieval |
+| `DEFAULT_LR_FINETUNE` | 5e-5 | Fine-tuning only — needs to be separate from DEFAULT_LR |
+| `DEFAULT_EPOCHS_RANKER` | 5 | MF pretraining epochs before retrieval |
+| `DEFAULT_EPOCHS_RETRIEVAL` | 15 | Max retrieval epochs (early stopping usually triggers earlier) |
+| `DEFAULT_EPOCHS_FINETUNE` | 75 | Max fine-tune epochs (early stopping triggers around 22-50) |
+| `DEFAULT_RETRIEVAL_TOPK` | 100 | In-batch Recall@K during retrieval training |
+| `candidate_topk` | 200 | Candidates passed to ranker per user |
 
 ---
 
-## Future Improvements
+## Possible Next Steps
 
-Possible future improvements include:
+Things I didn't get to but would try next:
 
-* Add approximate nearest neighbor search using FAISS
-* Try deeper neural ranking models
-* Improve hard negative sampling strategies
-* Add item popularity and diversity-aware reranking
-* Tune hyperparameters across multiple random seeds
-* Build a simple Streamlit demo for user-level recommendations
+- Replace the MF ranker with a deeper MLP ranker that concatenates user/item embeddings with side features — dot product MF is limited for distinguishing 200 candidates that are all plausible
+- MoCo-style momentum queue for retrieval training — more negatives without scaling batch size, would likely push val Recall@100 above 0.22
+- FAISS for approximate nearest neighbor search during candidate generation — currently using exact inner product which is fine at this scale but wouldn't be in production
+- Multiple seeds for more reliable variance estimates — currently reporting single seed results
 
 ---
 
 ## Notes
 
-* The dataset is downloaded automatically
-* Raw data and model checkpoints are not committed to GitHub
-* Results may vary slightly depending on hardware and random seed
-* The current reported results use one seed for faster experimentation
+- Raw data and model checkpoints are gitignored
+- Results can vary slightly across runs due to hard negative sampling randomness in retrieval training
+- Currently reporting single-seed results (`SEEDS = [0]`) — multi-seed averaging is supported by the pipeline but slow
